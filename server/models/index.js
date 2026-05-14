@@ -148,6 +148,32 @@ const RiskAssessment = sequelize.define('RiskAssessment', {
   mitigationSuggestions: { type: DataTypes.TEXT }
 }, { tableName: 'risk_assessments', timestamps: true });
 
+// AiResult Model — persists every AI response
+const AiResult = sequelize.define('AiResult', {
+  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  userId: { type: DataTypes.INTEGER },
+  endpoint: { type: DataTypes.STRING(100) },
+  entityType: { type: DataTypes.STRING(50) },
+  entityId: { type: DataTypes.INTEGER },
+  model: { type: DataTypes.STRING(100) },
+  prompt: { type: DataTypes.TEXT },
+  rawResponse: { type: DataTypes.TEXT },
+  parsedJson: { type: DataTypes.JSONB },
+  tokensUsed: { type: DataTypes.INTEGER },
+  status: { type: DataTypes.ENUM('success', 'error'), defaultValue: 'success' }
+}, { tableName: 'ai_results', timestamps: true, updatedAt: false });
+
+// AuditLog Model
+const AuditLog = sequelize.define('AuditLog', {
+  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  userId: { type: DataTypes.INTEGER },
+  action: { type: DataTypes.STRING(100) },
+  entityType: { type: DataTypes.STRING(50) },
+  entityId: { type: DataTypes.INTEGER },
+  oldValue: { type: DataTypes.JSONB },
+  newValue: { type: DataTypes.JSONB }
+}, { tableName: 'audit_logs', timestamps: true, updatedAt: false });
+
 // Associations
 Property.hasMany(Valuation, { foreignKey: 'propertyId' });
 Valuation.belongsTo(Property, { foreignKey: 'propertyId' });
@@ -178,5 +204,7 @@ module.exports = {
   Neighborhood,
   RenovationEstimate,
   TaxAssessment,
-  RiskAssessment
+  RiskAssessment,
+  AuditLog,
+  AiResult
 };

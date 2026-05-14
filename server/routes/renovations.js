@@ -1,13 +1,28 @@
 const express = require('express');
-const { RenovationEstimate, Property } = require('../models');
-const { callOpenRouter } = require('../services/openrouter');
+const { RenovationEstimate, Property, AiResult } = require('../models');
+const { callOpenRouter, parseAIJson } = require('../services/openrouter');
 const auth = require('../middleware/auth');
 const router = express.Router();
 
+async function persistAiResult(userId, endpoint, entityType, entityId, prompt, content, tokensUsed, parsedJson) {
+  try {
+    await AiResult.create({
+      userId, endpoint, entityType, entityId,
+      model: process.env.OPENROUTER_MODEL || 'anthropic/claude-3-5-sonnet-20241022',
+      prompt, rawResponse: content, parsedJson: parsedJson || null, tokensUsed, status: 'success'
+    });
+  } catch (e) { console.error('Failed to persist AI result:', e.message); }
+}
+
 router.get('/', auth, async (req, res) => {
   try {
-    const renovations = await RenovationEstimate.findAll({ include: [Property], order: [['createdAt', 'DESC']] });
-    res.json(renovations);
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 25));
+    const offset = (page - 1) * limit;
+    const { count, rows: renovations } = await RenovationEstimate.findAndCountAll({
+      include: [Property], order: [['createdAt', 'DESC']], limit, offset
+    });
+    res.json({ data: renovations, total: count, page, limit, totalPages: Math.ceil(count / limit) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -59,9 +74,9 @@ router.post('/:id/ai-advise', auth, async (req, res) => {
   try {
     const renovation = await RenovationEstimate.findByPk(req.params.id, { include: [Property] });
     if (!renovation) return res.status(404).json({ error: 'Renovation not found' });
-
     const property = renovation.Property;
-    const prompt = `Provide renovation advice for this property improvement:
+
+    const prompt = `Provide renovation advice for this property improvement.
 Property: ${property ? property.address + ', ' + property.city : 'N/A'}
 Renovation Type: ${renovation.renovationType}
 Estimated Cost: $${renovation.estimatedCost}
@@ -70,17 +85,27 @@ ROI: ${renovation.roiPercentage}%
 Priority: ${renovation.priority}
 Timeline: ${renovation.timelineWeeks} weeks
 
-Please provide:
-1. Is this renovation worth the investment?
-2. Cost optimization suggestions
-3. Potential to increase ROI
-4. Timeline feasibility
-5. Contractor selection tips
-6. Permit and compliance considerations`;
+Return JSON:
+{
+  "worthIt": true|false,
+  "worthItReason": "text",
+  "costOptimizations": ["tip1","tip2"],
+  "roiImprovements": ["imp1","imp2"],
+  "timelineFeasible": true|false,
+  "contractorTips": ["tip1","tip2"],
+  "permitNeeded": true|false,
+  "complianceNotes": "text",
+  "recommendation": "proceed|modify|skip",
+  "analysis": "full narrative"
+}`;
 
-    const aiResponse = await callOpenRouter(prompt);
-    await renovation.update({ aiSuggestion: aiResponse });
-    res.json({ analysis: aiResponse, renovation });
+    const { content: aiResponse, tokensUsed } = await callOpenRouter(prompt,
+      'You are a real estate renovation advisor. Return only valid JSON.');
+    const parsed = parseAIJson(aiResponse);
+    const analysisText = parsed?.analysis || aiResponse;
+    await renovation.update({ aiSuggestion: analysisText });
+    await persistAiResult(req.user.id, 'ai-advise', 'renovation', renovation.id, prompt, aiResponse, tokensUsed, parsed);
+    res.json({ analysis: analysisText, parsed, renovation });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

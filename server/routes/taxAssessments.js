@@ -1,13 +1,28 @@
 const express = require('express');
-const { TaxAssessment, Property } = require('../models');
-const { callOpenRouter } = require('../services/openrouter');
+const { TaxAssessment, Property, AiResult } = require('../models');
+const { callOpenRouter, parseAIJson } = require('../services/openrouter');
 const auth = require('../middleware/auth');
 const router = express.Router();
 
+async function persistAiResult(userId, endpoint, entityType, entityId, prompt, content, tokensUsed, parsedJson) {
+  try {
+    await AiResult.create({
+      userId, endpoint, entityType, entityId,
+      model: process.env.OPENROUTER_MODEL || 'anthropic/claude-3-5-sonnet-20241022',
+      prompt, rawResponse: content, parsedJson: parsedJson || null, tokensUsed, status: 'success'
+    });
+  } catch (e) { console.error('Failed to persist AI result:', e.message); }
+}
+
 router.get('/', auth, async (req, res) => {
   try {
-    const assessments = await TaxAssessment.findAll({ include: [Property], order: [['assessmentYear', 'DESC']] });
-    res.json(assessments);
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 25));
+    const offset = (page - 1) * limit;
+    const { count, rows: assessments } = await TaxAssessment.findAndCountAll({
+      include: [Property], order: [['assessmentYear', 'DESC']], limit, offset
+    });
+    res.json({ data: assessments, total: count, page, limit, totalPages: Math.ceil(count / limit) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -59,9 +74,9 @@ router.post('/:id/ai-appeal', auth, async (req, res) => {
   try {
     const assessment = await TaxAssessment.findByPk(req.params.id, { include: [Property] });
     if (!assessment) return res.status(404).json({ error: 'Tax assessment not found' });
-
     const property = assessment.Property;
-    const prompt = `Analyze this property tax assessment for appeal potential:
+
+    const prompt = `Analyze this property tax assessment for appeal potential.
 Property: ${property ? property.address + ', ' + property.city + ', ' + property.state : 'N/A'}
 Assessed Value: $${assessment.assessedValue}
 Tax Rate: ${assessment.taxRate}%
@@ -72,17 +87,25 @@ Improvement Value: $${assessment.improvementValue}
 Exemptions: ${assessment.exemptions || 'None'}
 ${property ? `Market Value Estimate: $${property.estimatedValue}` : ''}
 
-Please provide:
-1. Is the assessment fair or over-assessed?
-2. Potential savings from an appeal
-3. Strength of appeal case (1-10)
-4. Key arguments for the appeal
-5. Required documentation
-6. Appeal process recommendations`;
+Return JSON:
+{
+  "overAssessed": true|false,
+  "potentialSavings": number (annual $),
+  "appealStrength": number (1-10),
+  "keyArguments": ["arg1","arg2","arg3"],
+  "requiredDocuments": ["doc1","doc2"],
+  "appealProcess": "text",
+  "successProbability": number (0-100),
+  "analysis": "full narrative"
+}`;
 
-    const aiResponse = await callOpenRouter(prompt);
-    await assessment.update({ aiAppealAnalysis: aiResponse });
-    res.json({ analysis: aiResponse, assessment });
+    const { content: aiResponse, tokensUsed } = await callOpenRouter(prompt,
+      'You are a property tax appeal specialist. Return only valid JSON.');
+    const parsed = parseAIJson(aiResponse);
+    const analysisText = parsed?.analysis || aiResponse;
+    await assessment.update({ aiAppealAnalysis: analysisText });
+    await persistAiResult(req.user.id, 'ai-appeal', 'tax_assessment', assessment.id, prompt, aiResponse, tokensUsed, parsed);
+    res.json({ analysis: analysisText, parsed, assessment });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
