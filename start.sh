@@ -1,80 +1,19 @@
-#!/bin/bash
-
-echo "========================================="
-echo "  AI Property Valuation Agent"
-echo "  Starting Application..."
-echo "========================================="
-
-# Load environment variables
-set -a
-source .env 2>/dev/null
-set +a
-
-BACKEND_PORT=${BACKEND_PORT:-3001}
-FRONTEND_PORT=${FRONTEND_PORT:-3000}
-
-# Kill processes on used ports
-echo ""
-echo "[1/6] Cleaning up ports $BACKEND_PORT and $FRONTEND_PORT..."
-lsof -ti:$BACKEND_PORT | xargs kill -9 2>/dev/null
-lsof -ti:$FRONTEND_PORT | xargs kill -9 2>/dev/null
-sleep 1
-echo "  Ports cleaned."
-
-# Check PostgreSQL
-echo ""
-echo "[2/6] Checking PostgreSQL..."
-if ! pg_isready -q 2>/dev/null; then
-  echo "  PostgreSQL is not running. Attempting to start..."
-  brew services start postgresql@14 2>/dev/null || brew services start postgresql 2>/dev/null
-  sleep 2
-  if ! pg_isready -q 2>/dev/null; then
-    echo "  ERROR: Could not start PostgreSQL. Please start it manually."
-    exit 1
-  fi
-fi
-echo "  PostgreSQL is running."
-
-# Create database if not exists
-echo ""
-echo "[3/6] Setting up database..."
-createdb ai_property_valuation 2>/dev/null
-echo "  Database ready."
-
-# Install dependencies
-echo ""
-echo "[4/6] Installing dependencies..."
-npm install --silent 2>/dev/null
-cd client && npm install --silent 2>/dev/null
-cd ..
-echo "  Dependencies installed."
-
-# Seed database
-echo ""
-echo "[5/6] Seeding database with sample data..."
-node server/seed.js
-echo "  Database seeded."
-
-# Start application with hot reload
-echo ""
-echo "[6/6] Starting application with hot reload..."
-echo ""
-echo "========================================="
-echo "  Backend:  http://localhost:$BACKEND_PORT"
-echo "  Frontend: http://localhost:$FRONTEND_PORT"
-echo ""
-echo "  Login Credentials:"
-echo "  admin@propvaluation.com / password123"
-echo "  appraiser@propvaluation.com / password123"
-echo "  agent@propvaluation.com / password123"
-echo "  investor@propvaluation.com / password123"
-echo "========================================="
-echo ""
-
-# Start both servers with hot reload (nodemon for backend, react-scripts for frontend)
-export PORT=$FRONTEND_PORT
-npx concurrently \
-  --names "SERVER,CLIENT" \
-  --prefix-colors "blue,green" \
-  "npx nodemon --watch server server/index.js" \
-  "cd client && PORT=$FRONTEND_PORT npm start"
+#!/usr/bin/env bash
+set -euo pipefail
+PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BACKEND_PORT="${BACKEND_PORT:-3001}"
+FRONTEND_PORT="${FRONTEND_PORT:-3000}"
+CHILD_PIDS=()
+require_file(){ [ -f "$1" ]||{ echo "Missing required file: $1" >&2;exit 1;};}
+require_dir(){ [ -d "$1" ]||{ echo "Missing dependencies: $1 (install explicitly before startup)" >&2;exit 1;};}
+port_free(){ if command -v lsof >/dev/null 2>&1&&lsof -ti ":$1" >/dev/null 2>&1;then echo "Port $1 is already in use; refusing to terminate another process." >&2;exit 1;fi;}
+cleanup(){ for pid in "${CHILD_PIDS[@]:-}";do [ -n "$pid" ]&&kill "$pid" 2>/dev/null||true;done;}
+trap cleanup INT TERM EXIT
+require_file "$PROJECT_DIR/.env"
+require_dir "$PROJECT_DIR/node_modules"
+require_dir "$PROJECT_DIR/client/node_modules"
+port_free "$BACKEND_PORT";port_free "$FRONTEND_PORT"
+(cd "$PROJECT_DIR/."&&BACKEND_PORT="$BACKEND_PORT" node server/index.js)&CHILD_PIDS+=("$!")
+(cd "$PROJECT_DIR/client"&&npm run dev -- --port "$FRONTEND_PORT" --host 127.0.0.1)&CHILD_PIDS+=("$!")
+echo "Property valuation services started without installing, seeding, migrating, or reclaiming ports."
+wait "${CHILD_PIDS[@]}"

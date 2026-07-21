@@ -4,23 +4,22 @@ const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const { sequelize } = require('./models');
+const { validateRuntime } = require('./governance/runtime');
+const { createProviderGate } = require('./governance/providerGate');
+const governanceRouter = require('./governance/router');
 
 // Validate required env vars at startup
-if (!process.env.JWT_SECRET) {
-  console.error('FATAL: JWT_SECRET environment variable is required');
-  process.exit(1);
-}
+validateRuntime();
 
 const app = express();
 const PORT = process.env.BACKEND_PORT || 3001;
 
 // Security middleware
 app.use(helmet());
-app.use(cors({
-  origin: process.env.CLIENT_URL || 'http://localhost:3000',
-  credentials: true
-}));
+const allowedOrigins=String(process.env.CORS_ORIGINS||process.env.CLIENT_URL||'http://localhost:3000').split(',').map(v=>v.trim()).filter(Boolean);
+app.use(cors({origin:(origin,cb)=>!origin||allowedOrigins.includes(origin)?cb(null,true):cb(new Error('Origin not allowed by CORS')),credentials:true}));
 app.use(express.json());
+app.use(createProviderGate(['/api/ai','/api/gap']));
 
 // AI rate limiter: 20 requests per hour per user/IP
 const aiRateLimiter = rateLimit({
@@ -32,6 +31,9 @@ const aiRateLimiter = rateLimit({
 
 // Routes
 app.use('/api/auth', require('./routes/auth'));
+app.get('/api/health', (_req,res)=>res.json({status:'ok',timestamp:new Date().toISOString()}));
+const auth = require('./middleware/auth');
+app.use('/api', auth);
 app.use('/api/properties', require('./routes/properties'));
 app.use('/api/valuations', require('./routes/valuations'));
 app.use('/api/comparables', require('./routes/comparables'));
@@ -43,7 +45,6 @@ app.use('/api/tax-assessments', require('./routes/taxAssessments'));
 app.use('/api/risk-assessments', require('./routes/riskAssessments'));
 
 // Apply AI rate limiter to all AI enhancement endpoints
-const auth = require('./middleware/auth');
 const aiPaths = [
   '/api/valuations/:id/ai-enhance',
   '/api/properties/:id/ai-valuation',
@@ -94,6 +95,7 @@ app.get('/api/dashboard/stats', auth, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+app.use('/api/governed-property-valuations', governanceRouter);
 
 // Start server
 async function startServer() {
@@ -101,8 +103,10 @@ async function startServer() {
     await sequelize.authenticate();
     console.log('Database connected successfully');
     // Use alter: false to avoid destructive schema changes in production
-    await sequelize.sync({ alter: false });
-    console.log('Database synced');
+    if (process.env.ENABLE_LEGACY_SCHEMA_BOOTSTRAP === 'true') {
+      await sequelize.sync({ alter: false });
+      console.log('Legacy model synchronization completed by explicit opt-in');
+    }
     app.listen(PORT, () => {
       console.log(`Server running on port ${PORT}`);
     });
