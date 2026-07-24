@@ -72,7 +72,11 @@ function parseAIJson(text) {
 
 async function callOpenRouter(prompt, systemPrompt = 'You are an expert real estate appraiser and property valuation AI assistant.') {
   try {
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    if (!process.env.OPENROUTER_API_KEY) {
+      throw new Error('OPENROUTER_API_KEY is required');
+    }
+    const baseUrl = (process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1').replace(/\/$/, '');
+    const response = await fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
@@ -93,6 +97,10 @@ async function callOpenRouter(prompt, systemPrompt = 'You are an expert real est
 
     const data = await response.json();
 
+    if (!response.ok) {
+      throw new Error(data?.error?.message || `OpenRouter request failed with status ${response.status}`);
+    }
+
     if (data.error) {
       throw new Error(data.error.message || 'OpenRouter API error');
     }
@@ -101,7 +109,10 @@ async function callOpenRouter(prompt, systemPrompt = 'You are an expert real est
       console.warn('OpenRouter response truncated (finish_reason: length).');
     }
 
-    const rawContent = data.choices?.[0]?.message?.content || 'No response generated';
+    const rawContent = data.choices?.[0]?.message?.content;
+    if (!rawContent || !String(rawContent).trim()) {
+      throw new Error('OpenRouter returned an empty response');
+    }
     const content = stripMarkdownFences(rawContent);
     const tokensUsed = data.usage?.total_tokens || 0;
 

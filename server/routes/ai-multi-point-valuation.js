@@ -2,7 +2,7 @@
 // Run multiple AI valuation approaches in parallel with confidence ranges
 const express = require('express');
 const router = express.Router();
-// models optional — persistence disabled in this v0 scaffold
+const { AiResult } = require('../models');
 const authMiddleware = require('../middleware/auth');
 
 const MODEL = process.env.OPENROUTER_MODEL || 'anthropic/claude-3-5-sonnet-20241022';
@@ -11,7 +11,7 @@ const MODEL = process.env.OPENROUTER_MODEL || 'anthropic/claude-3-5-sonnet-20241
 async function callLLM(systemPrompt, userPrompt) {
   const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey) return { success: false, error: 'OPENROUTER_API_KEY not configured' };
-  const baseUrl = process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1';
+  const baseUrl = (process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1').replace(/\/$/, '');
   const response = await fetch(baseUrl + '/chat/completions', {
     method: 'POST',
     headers: {
@@ -32,7 +32,9 @@ async function callLLM(systemPrompt, userPrompt) {
   });
   if (!response.ok) return { success: false, error: `LLM error ${response.status}` };
   const data = await response.json();
-  return { success: true, content: data.choices?.[0]?.message?.content || '' };
+  const content = data.choices?.[0]?.message?.content;
+  if (!content || !String(content).trim()) return { success: false, error: 'LLM returned an empty response' };
+  return { success: true, content, tokensUsed: data.usage?.total_tokens || 0 };
 }
 
 function parseJsonLoose(text) {
@@ -46,8 +48,17 @@ function parseJsonLoose(text) {
   return null;
 }
 
-async function persistResult(userId, endpoint, inputData, result) {
-  // no shared pool/models import — persistence skipped
+async function persistResult(userId, endpoint, inputData, result, tokensUsed) {
+  return AiResult.create({
+    userId,
+    endpoint,
+    model: MODEL,
+    prompt: JSON.stringify(inputData),
+    rawResponse: JSON.stringify(result),
+    parsedJson: result,
+    tokensUsed,
+    status: 'success'
+  });
 }
 
 router.use(authMiddleware);
@@ -61,7 +72,7 @@ router.post('/', async (req, res) => {
     const llm = await callLLM(systemPrompt, userPrompt);
     if (!llm.success) return res.status(503).json({ error: llm.error });
     const parsed = parseJsonLoose(llm.content) || { raw: llm.content };
-    await persistResult(req.user?.id, 'multi-point-valuation', context, parsed);
+    await persistResult(req.user?.id, 'multi-point-valuation', context, parsed, llm.tokensUsed);
     res.json({ feature: 'multi-point-valuation', model: MODEL, result: parsed });
   } catch (err) {
     console.error('[multi-point-valuation]', err.message);
@@ -72,7 +83,12 @@ router.post('/', async (req, res) => {
 // GET /history — recent results for current user
 router.get('/history', async (req, res) => {
   try {
-    return res.json({ items: [] });
+    const items = await AiResult.findAll({
+      where: { userId: req.user.id, endpoint: 'multi-point-valuation' },
+      order: [['createdAt', 'DESC']],
+      limit: 50
+    });
+    return res.json({ items });
   } catch (err) {
     res.json({ items: [], error: err.message });
   }
