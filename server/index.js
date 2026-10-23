@@ -96,6 +96,7 @@ app.get('/api/dashboard/stats', auth, async (req, res) => {
   }
 });
 app.use('/api/governed-property-valuations', governanceRouter);
+app.use('/api/tasks', require('./routes/featurePack43a'));
 
 // Start server
 async function startServer() {
